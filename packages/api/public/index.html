@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>J-Sub Buyer</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; }
+  section { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+  input[type=text], input[type=number] { width: 100%; padding: .5rem; box-sizing: border-box; margin: .25rem 0 .5rem; }
+  button { padding: .5rem 1rem; border: 0; border-radius: 6px; background: #d98324; color: #fff; cursor: pointer; }
+  button.secondary { background: #666; }
+  pre { background: #f5f5f5; padding: .75rem; border-radius: 6px; overflow: auto; white-space: pre-wrap; max-height: 320px; }
+  table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+  th, td { text-align: left; padding: .3rem .4rem; border-bottom: 1px solid #eee; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #faf3e8; }
+  .badge { display: inline-block; padding: .15rem .5rem; border-radius: 999px; font-size: .8rem; }
+  .ok { background: #d7f5d7; } .bad { background: #f8d7d7; }
+</style>
+</head>
+<body>
+  <h1>J-Sub Buyer — test console</h1>
+
+  <section>
+    <strong>Session:</strong> <span id="session" class="badge">…</span>
+    <button class="secondary" onclick="checkSession()">Refresh</button>
+    <button class="secondary" onclick="setToken()">Set token</button>
+    <div><small>Login is a local step: run <code>scripts/login.ts</code> and ship <code>storageState.json</code>.</small></div>
+  </section>
+
+  <section>
+    <strong>Preview</strong>
+    <input id="preview-url" type="text" placeholder="https://jp.mercari.com/item/m..." />
+    <button onclick="doPreview()">Preview</button>
+    <pre id="preview-out"></pre>
+  </section>
+
+  <section>
+    <strong>Buy</strong> <small>(spends real money on a funded account)</small>
+    <input id="buy-url" type="text" placeholder="https://jp.mercari.com/item/m..." />
+    <input id="buy-max" type="number" placeholder="maxPriceJPY (optional)" />
+    <button onclick="doBuy()">Agree &amp; Buy</button>
+    <pre id="buy-out"></pre>
+  </section>
+
+  <section>
+    <strong>Research</strong>
+    <button class="secondary" onclick="loadRuns()">Refresh runs</button>
+    <table>
+      <thead><tr><th>time</th><th>action</th><th>status</th><th>price</th><th>runId</th></tr></thead>
+      <tbody id="runs"></tbody>
+    </table>
+    <div id="run-detail"></div>
+  </section>
+
+  <section>
+    <strong>Admin — Users</strong>
+    <button class="secondary" onclick="adminLoadUsers()">Refresh</button>
+    <table id="admin-users-table">
+      <thead><tr><th>id</th><th>username</th><th>status</th><th>balance (RUB)</th><th>actions</th></tr></thead>
+      <tbody id="admin-users"></tbody>
+    </table>
+    <div id="admin-msg" style="margin:.5rem 0; color:#c44;"></div>
+
+    <details style="margin-top:.75rem;">
+      <summary style="cursor:pointer; font-weight:600;">Top-up a user</summary>
+      <div style="margin-top:.5rem;">
+        <label>User ID <input id="topup-id" type="number" placeholder="telegram_id" style="width:120px;" /></label>
+        <label style="margin-left:.5rem;">Amount (RUB) <input id="topup-amount" type="number" placeholder="500" style="width:100px;" /></label>
+        <label style="margin-left:.5rem;">Note <input id="topup-note" type="text" placeholder="card" style="width:120px;" /></label>
+        <button onclick="adminTopup()" style="margin-left:.5rem;">Top-up</button>
+      </div>
+    </details>
+
+    <div id="admin-txns-wrap" style="display:none; margin-top:.75rem;">
+      <strong>Transactions for user <span id="admin-txns-uid"></span></strong>
+      <button class="secondary" onclick="document.getElementById('admin-txns-wrap').style.display='none'">Close</button>
+      <table>
+        <thead><tr><th>#</th><th>delta (kopecks)</th><th>reason</th><th>ref</th><th>time</th></tr></thead>
+        <tbody id="admin-txns"></tbody>
+      </table>
+    </div>
+  </section>
+
+<script>
+function token() {
+  let t = localStorage.getItem('apiToken');
+  if (t === null) { t = prompt('API token (leave empty if auth disabled):') || ''; localStorage.setItem('apiToken', t); }
+  return t;
+}
+function setToken() { localStorage.removeItem('apiToken'); token(); }
+function headers() {
+  const h = { 'content-type': 'application/json' };
+  const t = token();
+  if (t) h['authorization'] = 'Bearer ' + t;
+  return h;
+}
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  let body; try { body = await res.json(); } catch { body = await res.text(); }
+  return { status: res.status, body };
+}
+function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
+// --- Admin helpers ---
+function adminMsg(msg, ok) {
+  const el = document.getElementById('admin-msg');
+  el.textContent = msg;
+  el.style.color = ok ? '#2a7a2a' : '#c44';
+}
+async function adminLoadUsers() {
+  const tb = document.getElementById('admin-users'); tb.innerHTML = '<tr><td colspan="5">…</td></tr>';
+  adminMsg('');
+  const { status, body } = await api('/admin/users', { headers: headers() });
+  if (status !== 200) { tb.innerHTML = '<tr><td colspan="5">HTTP ' + status + '</td></tr>'; return; }
+  if (!Array.isArray(body) || body.length === 0) { tb.innerHTML = '<tr><td colspan="5">no users</td></tr>'; return; }
+  tb.innerHTML = body.map((u) =>
+    '<tr>' +
+    '<td>' + esc(u.telegramId) + '</td>' +
+    '<td>' + esc(u.username || '—') + '</td>' +
+    '<td><span class="badge ' + (u.status === 'active' ? 'ok' : 'bad') + '">' + esc(u.status) + '</span></td>' +
+    '<td>' + esc((u.balanceRub / 100).toFixed(2)) + '</td>' +
+    '<td>' +
+      '<button onclick="adminSetStatus(' + esc(u.telegramId) + ',\'activate\')">Activate</button> ' +
+      '<button class="secondary" onclick="adminSetStatus(' + esc(u.telegramId) + ',\'block\')">Block</button> ' +
+      '<button class="secondary" onclick="adminShowTxns(' + esc(u.telegramId) + ')">Txns</button>' +
+    '</td>' +
+    '</tr>'
+  ).join('');
+}
+async function adminSetStatus(id, action) {
+  const { status, body } = await api('/admin/users/' + id + '/' + action, { method: 'POST', headers: headers() });
+  if (status === 200) { adminMsg('Done: ' + action + ' user ' + id, true); adminLoadUsers(); }
+  else adminMsg('Error ' + status + ': ' + JSON.stringify(body), false);
+}
+async function adminTopup() {
+  const id = document.getElementById('topup-id').value.trim();
+  const amountRub = parseFloat(document.getElementById('topup-amount').value);
+  const note = document.getElementById('topup-note').value.trim();
+  if (!id || isNaN(amountRub) || amountRub <= 0) { adminMsg('Fill in user ID and a positive amount.', false); return; }
+  const { status, body } = await api('/admin/users/' + id + '/topup', {
+    method: 'POST', headers: headers(), body: JSON.stringify({ amountRub, note: note || undefined }),
+  });
+  if (status === 200) { adminMsg('Topped up user ' + id + '. New balance: ' + (body.balanceRub / 100).toFixed(2) + ' RUB', true); adminLoadUsers(); }
+  else adminMsg('Error ' + status + ': ' + JSON.stringify(body), false);
+}
+async function adminShowTxns(id) {
+  document.getElementById('admin-txns-uid').textContent = id;
+  const wrap = document.getElementById('admin-txns-wrap'); wrap.style.display = 'block';
+  const tb = document.getElementById('admin-txns'); tb.innerHTML = '<tr><td colspan="5">…</td></tr>';
+  const { status, body } = await api('/admin/users/' + id + '/txns', { headers: headers() });
+  if (status !== 200 || !Array.isArray(body)) { tb.innerHTML = '<tr><td colspan="5">HTTP ' + status + '</td></tr>'; return; }
+  if (body.length === 0) { tb.innerHTML = '<tr><td colspan="5">no transactions</td></tr>'; return; }
+  tb.innerHTML = body.map((t) =>
+    '<tr><td>' + esc(t.id) + '</td><td>' + esc(t.deltaRub) + '</td><td>' + esc(t.reason) + '</td><td>' + esc(t.ref || '—') + '</td><td>' + esc(t.createdAt) + '</td></tr>'
+  ).join('');
+}
+adminLoadUsers();
+
+async function checkSession() {
+  const el = document.getElementById('session');
+  el.textContent = '…'; el.className = 'badge';
+  const { status, body } = await api('/session', { headers: headers() });
+  if (status === 200 && body.loggedIn) { el.textContent = 'logged in'; el.className = 'badge ok'; }
+  else if (status === 401) { el.textContent = 'unauthorized'; el.className = 'badge bad'; }
+  else { el.textContent = 'not logged in'; el.className = 'badge bad'; }
+}
+async function doPreview() {
+  const url = document.getElementById('preview-url').value.trim();
+  const out = document.getElementById('preview-out'); out.textContent = '…';
+  const { status, body } = await api('/item/preview', { method: 'POST', headers: headers(), body: JSON.stringify({ url }) });
+  out.textContent = 'HTTP ' + status + '\n' + JSON.stringify(body, null, 2);
+}
+async function doBuy() {
+  const url = document.getElementById('buy-url').value.trim();
+  const maxRaw = document.getElementById('buy-max').value;
+  if (!confirm('Buy for REAL money on a funded account?')) return;
+  const payload = { url };
+  if (maxRaw) payload.maxPriceJPY = Number(maxRaw);
+  const out = document.getElementById('buy-out'); out.textContent = '…';
+  const { status, body } = await api('/item/buy', { method: 'POST', headers: headers(), body: JSON.stringify(payload) });
+  out.textContent = 'HTTP ' + status + '\n' + JSON.stringify(body, null, 2);
+}
+async function loadRuns() {
+  const tb = document.getElementById('runs'); tb.innerHTML = '<tr><td colspan="5">…</td></tr>';
+  const { status, body } = await api('/research/runs?limit=50', { headers: headers() });
+  if (status !== 200 || !Array.isArray(body)) { tb.innerHTML = '<tr><td colspan="5">HTTP ' + status + '</td></tr>'; return; }
+  if (body.length === 0) { tb.innerHTML = '<tr><td colspan="5">no runs yet</td></tr>'; return; }
+  tb.innerHTML = body.map((r) =>
+    '<tr onclick="loadRun(\'' + esc(r.runId) + '\')">' +
+    '<td>' + esc(r.ts) + '</td><td>' + esc(r.action) + '</td><td>' + esc(r.status) +
+    '</td><td>' + esc(r.priceJPY) + '</td><td>' + esc(r.runId) + '</td></tr>').join('');
+}
+async function loadRun(runId) {
+  const box = document.getElementById('run-detail'); box.textContent = 'loading…';
+  const { status, body } = await api('/research/runs/' + encodeURIComponent(runId), { headers: headers() });
+  if (status !== 200) { box.textContent = 'HTTP ' + status; return; }
+  // Foreign page HTML is shown as TEXT only (never injected) to avoid executing it.
+  const htmlBlobUrl = URL.createObjectURL(new Blob([body.html || ''], { type: 'text/plain' }));
+  box.innerHTML =
+    '<h4>Record</h4><pre>' + esc(JSON.stringify(body.record, null, 2)) + '</pre>' +
+    '<h4>Network (' + (body.network ? body.network.length : 0) + ')</h4><pre>' +
+      esc((body.network || []).map((n) => {
+        const dir = n.kind === 'response' ? '<= ' : '=> ';
+        const st = n.status != null ? ' [' + n.status + (n.statusText ? ' ' + n.statusText : '') + ']' : '';
+        const payload = n.post ? '  ' + n.post : (n.respBody ? '  ' + n.respBody : '');
+        return dir + n.method + ' ' + n.url + st + payload;
+      }).join('\n')) + '</pre>' +
+    '<h4>Page HTML</h4>' +
+    '<a href="' + htmlBlobUrl + '" target="_blank">open raw HTML (' + (body.html ? body.html.length : 0) + ' chars)</a>' +
+    '<pre>' + esc((body.html || '').slice(0, 4000)) + '</pre>';
+}
+checkSession();
+</script>
+</body>
+</html>

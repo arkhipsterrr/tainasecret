@@ -1,0 +1,13 @@
+# Playwright persistent profiles — CONTAIN LOGIN COOKIES. Never commit.
+.pw-user/
+.pw-capture/
+# Recon artifacts — may contain auth headers / cookies / personal data.
+artifacts/
+node_modules/
+storageState.json
+.idea/
+.env
+dist/
+data/
+.superpowers/
+tsconfig.tsbuildinfo

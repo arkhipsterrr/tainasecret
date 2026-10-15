@@ -1,0 +1,11 @@
+node_modules
+.pw-user
+artifacts
+data
+.git
+.env
+docs
+extension
+recon.mjs
+.superpowers
+npm-debug.log

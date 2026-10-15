@@ -1,0 +1,34 @@
+services:
+  api:
+    build: .
+    # host networking so the container can reach the SOCKS tunnel that the host
+    # keeps open on 127.0.0.1:1080 (egress via the WAF-clean IP). With host mode
+    # the app binds PORT directly on the host — no `ports:` mapping needed.
+    network_mode: host
+    env_file: .env
+    environment:
+      # Route Playwright's site traffic through the host's SOCKS tunnel.
+      # Unset this to go direct (e.g. on a WAF-clean host).
+      - PROXY_URL=socks5://127.0.0.1:1080
+    volumes:
+      # Session cookies produced by a local `scripts/login.ts` — copy the file
+      # into ./.pw-user before starting.
+      - ./.pw-user:/app/.pw-user
+      # Research logs + idempotency ledger persist across rebuilds.
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+    restart: unless-stopped
+
+  bot:
+    build: .
+    command: ["pnpm", "--filter", "@arhip/bot", "start"]
+    # No exposed ports — bot communicates outward via Telegram long-polling only.
+    network_mode: host
+    env_file: .env
+    environment:
+      - PROXY_URL=socks5://127.0.0.1:1080
+    volumes:
+      # Shares the same SQLite file as the api service.
+      - ./data:/app/data
+      - ./.pw-user:/app/.pw-user
+    restart: unless-stopped
